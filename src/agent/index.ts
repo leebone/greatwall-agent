@@ -3,16 +3,20 @@ import type { Config } from '../config/index.js';
 import type { Message, ToolCall, ToolResult, AgentConfig } from '../types/index.js';
 import { formatToolsForAnthropic, getToolByName } from '../tools/index.js';
 import { SessionStore } from '../memory/session-store.js';
+import { logger } from '../utils/logger.js';
 
 export class Agent {
   private client: Anthropic;
   private config: AgentConfig;
   private sessionStore: SessionStore;
+  private retryAttempts: number = 3;
+  private retryDelay: number = 1000;
 
   constructor(apiKey: string, config: AgentConfig, sessionStore: SessionStore) {
     this.client = new Anthropic({ apiKey });
     this.config = config;
     this.sessionStore = sessionStore;
+    logger.debug('Agent initialized', { model: config.model, maxIterations: config.maxIterations });
   }
 
   async chat(userMessage: string, sessionId?: string): Promise<string> {
@@ -21,6 +25,9 @@ export class Agent {
 
     if (!session) {
       session = await this.sessionStore.createSession(sid);
+      logger.info('Created new session', { sessionId: sid });
+    } else {
+      logger.info('Resuming session', { sessionId: sid, messageCount: session.messages.length });
     }
 
     // Add user message to session
@@ -32,9 +39,10 @@ export class Agent {
 
     while (iterations < this.config.maxIterations) {
       iterations++;
+      logger.debug(`Agent iteration ${iterations}/${this.config.maxIterations}`);
 
       try {
-        const response = await this.client.messages.create({
+        const response = await this.makeApiCallWithRetry({
           model: this.config.model,
           max_tokens: this.config.maxTokens,
           temperature: this.config.temperature,
@@ -59,6 +67,7 @@ export class Agent {
           };
           await this.sessionStore.addMessage(sid, assistantMsg);
 
+          logger.info('Chat completed', { iterations, sessionId: sid });
           return textContent;
         }
 
@@ -70,31 +79,11 @@ export class Agent {
           };
           messages.push(assistantMsg);
 
-          // Execute tools
-          const toolResults: ToolResult[] = [];
+          // Execute tools in parallel
+          const toolCalls = response.content.filter((c: any) => c.type === 'tool_use');
+          logger.info(`Executing ${toolCalls.length} tool(s)`);
 
-          for (const content of response.content) {
-            if (content.type === 'tool_use') {
-              const tool = getToolByName(content.name);
-              if (tool) {
-                console.log(`Executing tool: ${content.name}`);
-                const result = await tool.handler(content.input as Record<string, any>);
-
-                toolResults.push({
-                  toolCallId: content.id,
-                  content: result,
-                });
-
-                // Store tool usage in session
-                await this.sessionStore.addMessage(sid, {
-                  role: 'tool',
-                  content: result,
-                  toolCallId: content.id,
-                  toolName: content.name,
-                });
-              }
-            }
-          }
+          const toolResults = await this.executeToolsInParallel(toolCalls, sid);
 
           // Add tool results to messages
           for (const result of toolResults) {
@@ -109,7 +98,25 @@ export class Agent {
           continue;
         }
 
+        if (response.stop_reason === 'max_tokens') {
+          logger.warn('Response truncated due to max tokens limit');
+          const textContent = response.content
+            .filter((c: any) => c.type === 'text')
+            .map((c: any) => c.text)
+            .join('\n');
+
+          if (textContent) {
+            const assistantMsg: Message = {
+              role: 'assistant',
+              content: textContent + '\n\n[Response truncated - max tokens reached]',
+            };
+            await this.sessionStore.addMessage(sid, assistantMsg);
+            return assistantMsg.content;
+          }
+        }
+
         // If we reach here with an unexpected stop reason
+        logger.warn('Unexpected stop reason', { stopReason: response.stop_reason });
         const fallbackText = response.content
           .filter((c: any) => c.type === 'text')
           .map((c: any) => c.text)
@@ -123,12 +130,110 @@ export class Agent {
 
         return fallbackText;
       } catch (error: any) {
-        console.error('Error in agent loop:', error);
+        logger.error('Error in agent loop', {
+          error: error.message,
+          iteration: iterations,
+          sessionId: sid,
+        });
+
+        // If it's an API error, provide more specific information
+        if (error.status) {
+          throw new Error(`API Error (${error.status}): ${error.message}`);
+        }
+
         throw new Error(`Agent error: ${error.message}`);
       }
     }
 
-    return 'Maximum iterations reached. Please try a simpler query.';
+    logger.warn('Maximum iterations reached', { sessionId: sid });
+    return 'Maximum iterations reached. The task may be too complex. Please try breaking it into smaller steps.';
+  }
+
+  private async executeToolsInParallel(
+    toolCalls: any[],
+    sessionId: string
+  ): Promise<ToolResult[]> {
+    const results = await Promise.allSettled(
+      toolCalls.map(async (content) => {
+        const tool = getToolByName(content.name);
+        if (!tool) {
+          logger.error(`Tool not found: ${content.name}`);
+          return {
+            toolCallId: content.id,
+            content: JSON.stringify({ error: `Tool ${content.name} not found` }),
+          };
+        }
+
+        try {
+          logger.debug(`Executing tool: ${content.name}`, { input: content.input });
+          const startTime = Date.now();
+          const result = await tool.handler(content.input as Record<string, any>);
+          const duration = Date.now() - startTime;
+          logger.debug(`Tool completed: ${content.name}`, { duration: `${duration}ms` });
+
+          // Store tool usage in session
+          await this.sessionStore.addMessage(sessionId, {
+            role: 'tool',
+            content: result,
+            toolCallId: content.id,
+            toolName: content.name,
+          });
+
+          return {
+            toolCallId: content.id,
+            content: result,
+          };
+        } catch (error: any) {
+          logger.error(`Tool execution failed: ${content.name}`, { error: error.message });
+          return {
+            toolCallId: content.id,
+            content: JSON.stringify({ error: error.message }),
+          };
+        }
+      })
+    );
+
+    // Convert Promise.allSettled results to ToolResult[]
+    return results.map((result, index) => {
+      if (result.status === 'fulfilled') {
+        return result.value;
+      } else {
+        logger.error(`Tool promise rejected`, { error: result.reason });
+        return {
+          toolCallId: toolCalls[index].id,
+          content: JSON.stringify({ error: 'Tool execution failed' }),
+        };
+      }
+    });
+  }
+
+  private async makeApiCallWithRetry(params: any): Promise<any> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= this.retryAttempts; attempt++) {
+      try {
+        return await this.client.messages.create(params);
+      } catch (error: any) {
+        lastError = error;
+        logger.warn(`API call failed (attempt ${attempt}/${this.retryAttempts})`, {
+          error: error.message,
+          status: error.status,
+        });
+
+        // Don't retry on client errors (4xx), only on server errors (5xx) and network issues
+        if (error.status && error.status >= 400 && error.status < 500) {
+          throw error;
+        }
+
+        if (attempt < this.retryAttempts) {
+          const delay = this.retryDelay * Math.pow(2, attempt - 1); // Exponential backoff
+          logger.debug(`Retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    throw lastError || new Error('API call failed after retries');
   }
 
   private getDefaultSystemPrompt(): string {
@@ -144,6 +249,7 @@ When using tools:
 1. Think carefully about which tool to use
 2. Provide clear and precise parameters
 3. Interpret tool results and provide helpful responses to the user
+4. If a tool fails, try an alternative approach
 
 Always be helpful, accurate, and concise in your responses.`;
   }

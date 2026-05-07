@@ -1,6 +1,7 @@
 import storage from 'node-persist';
 import { mkdirSync, existsSync } from 'fs';
 import type { Session, Message, Memory } from '../types/index.js';
+import { logger } from '../utils/logger.js';
 
 export class SessionStore {
   private initialized: boolean = false;
@@ -11,6 +12,7 @@ export class SessionStore {
     // Ensure directory exists
     if (!existsSync(dbPath)) {
       mkdirSync(dbPath, { recursive: true });
+      logger.debug('Created session storage directory', { path: dbPath });
     }
   }
 
@@ -27,6 +29,7 @@ export class SessionStore {
         forgiveParseErrors: false
       });
       this.initialized = true;
+      logger.debug('Session storage initialized');
     }
   }
 
@@ -42,6 +45,7 @@ export class SessionStore {
     };
 
     await storage.setItem(`session:${id}`, session);
+    logger.info('Session created', { sessionId: id });
     return session;
   }
 
@@ -61,6 +65,43 @@ export class SessionStore {
     session.messages.push(message);
     session.updatedAt = new Date();
     await storage.setItem(`session:${sessionId}`, session);
+  }
+
+  async listSessions(limit?: number): Promise<Session[]> {
+    await this.ensureInitialized();
+    const keys = await storage.keys();
+    const sessionKeys = keys.filter((k: string) => k.startsWith('session:'));
+    const sessions: Session[] = [];
+
+    for (const key of sessionKeys) {
+      const session = await storage.getItem(key) as Session;
+      if (session) {
+        // Don't include full message history in list view
+        sessions.push({
+          ...session,
+          messages: session.messages.slice(0, 1), // Only keep first message for preview
+        });
+      }
+    }
+
+    // Sort by update time, most recent first
+    const sorted = sessions.sort((a, b) =>
+      new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    );
+
+    return limit ? sorted.slice(0, limit) : sorted;
+  }
+
+  async deleteSession(id: string): Promise<boolean> {
+    await this.ensureInitialized();
+    const session = await this.getSession(id);
+    if (!session) {
+      return false;
+    }
+
+    await storage.removeItem(`session:${id}`);
+    logger.info('Session deleted', { sessionId: id });
+    return true;
   }
 
   async searchSessions(query: string, limit: number = 10): Promise<Session[]> {
@@ -88,6 +129,7 @@ export class SessionStore {
   async addMemory(memory: Memory): Promise<void> {
     await this.ensureInitialized();
     await storage.setItem(`memory:${memory.id}`, memory);
+    logger.debug('Memory added', { memoryId: memory.id, type: memory.type });
   }
 
   async searchMemories(query: string, type?: string, limit: number = 10): Promise<Memory[]> {
@@ -112,8 +154,34 @@ export class SessionStore {
     return memories.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   }
 
+  async getStats(): Promise<{
+    sessionCount: number;
+    memoryCount: number;
+    totalMessages: number;
+  }> {
+    await this.ensureInitialized();
+    const keys = await storage.keys();
+    const sessionKeys = keys.filter((k: string) => k.startsWith('session:'));
+    const memoryKeys = keys.filter((k: string) => k.startsWith('memory:'));
+
+    let totalMessages = 0;
+    for (const key of sessionKeys) {
+      const session = await storage.getItem(key) as Session;
+      if (session) {
+        totalMessages += session.messages.length;
+      }
+    }
+
+    return {
+      sessionCount: sessionKeys.length,
+      memoryCount: memoryKeys.length,
+      totalMessages,
+    };
+  }
+
   async close(): Promise<void> {
     // node-persist doesn't need explicit closing
     this.initialized = false;
+    logger.debug('Session storage closed');
   }
 }

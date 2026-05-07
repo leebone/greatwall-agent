@@ -131,15 +131,62 @@ program
 program
   .command('sessions')
   .description('List all chat sessions')
-  .action(async () => {
+  .option('-l, --limit <number>', 'Limit number of sessions to display', '10')
+  .option('-s, --search <query>', 'Search sessions by content')
+  .option('--delete <id>', 'Delete a specific session')
+  .option('--stats', 'Show storage statistics')
+  .action(async (options) => {
     try {
       const config = loadConfig();
       const sessionStore = new SessionStore(config.dbPath);
 
-      // This would need implementation in SessionStore
-      console.log(chalk.yellow('Session listing feature coming soon!'));
+      if (options.stats) {
+        const stats = await sessionStore.getStats();
+        console.log(chalk.cyan.bold('\n📊 Storage Statistics\n'));
+        console.log(chalk.gray('Sessions:'), chalk.white(stats.sessionCount));
+        console.log(chalk.gray('Memories:'), chalk.white(stats.memoryCount));
+        console.log(chalk.gray('Total Messages:'), chalk.white(stats.totalMessages));
+        console.log();
+        await sessionStore.close();
+        return;
+      }
 
-      sessionStore.close();
+      if (options.delete) {
+        const deleted = await sessionStore.deleteSession(options.delete);
+        if (deleted) {
+          console.log(chalk.green(`\n✓ Session ${options.delete} deleted\n`));
+        } else {
+          console.log(chalk.red(`\n✗ Session ${options.delete} not found\n`));
+        }
+        await sessionStore.close();
+        return;
+      }
+
+      const limit = parseInt(options.limit) || 10;
+      let sessions;
+
+      if (options.search) {
+        console.log(chalk.cyan.bold(`\n🔍 Searching for: "${options.search}"\n`));
+        sessions = await sessionStore.searchSessions(options.search, limit);
+      } else {
+        console.log(chalk.cyan.bold('\n📝 Recent Sessions\n'));
+        sessions = await sessionStore.listSessions(limit);
+      }
+
+      if (sessions.length === 0) {
+        console.log(chalk.gray('No sessions found.\n'));
+      } else {
+        for (const session of sessions) {
+          const date = new Date(session.updatedAt).toLocaleString();
+          const preview = session.messages[0]?.content.slice(0, 60) || 'No messages';
+          console.log(chalk.white('Session:'), chalk.cyan(session.id));
+          console.log(chalk.gray('  Updated:'), date);
+          console.log(chalk.gray('  Preview:'), preview + (preview.length === 60 ? '...' : ''));
+          console.log();
+        }
+      }
+
+      await sessionStore.close();
     } catch (error: any) {
       console.error(chalk.red('Error:'), error.message);
       process.exit(1);
