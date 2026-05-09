@@ -3,6 +3,21 @@ import type { Message, ToolResult, AgentConfig } from '../types/index.js';
 import { formatToolsForAnthropic, getToolByName } from '../tools/index.js';
 import { SessionStore } from '../memory/session-store.js';
 import { logger } from '../utils/logger.js';
+import { APIError, ToolExecutionError, SessionError, ValidationError } from '../utils/errors.js';
+
+interface ContentBlock {
+  type: string;
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, any>;
+}
+
+interface APIResponse {
+  content: ContentBlock[];
+  stop_reason: string;
+  [key: string]: any;
+}
 
 export class Agent {
   private client: Anthropic;
@@ -19,6 +34,11 @@ export class Agent {
   }
 
   async chat(userMessage: string, sessionId?: string): Promise<string> {
+    // Validate input
+    if (!userMessage || !userMessage.trim()) {
+      throw new ValidationError('User message cannot be empty');
+    }
+
     const sid = sessionId || `session_${Date.now()}`;
     let session = await this.sessionStore.getSession(sid);
 
@@ -55,10 +75,7 @@ export class Agent {
 
         // Handle the response
         if (response.stop_reason === 'end_turn') {
-          const textContent = response.content
-            .filter((c: any) => c.type === 'text')
-            .map((c: any) => c.text)
-            .join('\n');
+          const textContent = this.extractTextContent(response.content);
 
           const assistantMsg: Message = {
             role: 'assistant',
@@ -79,7 +96,7 @@ export class Agent {
           messages.push(assistantMsg);
 
           // Execute tools in parallel
-          const toolCalls = response.content.filter((c: any) => c.type === 'tool_use');
+          const toolCalls = response.content.filter((c: ContentBlock) => c.type === 'tool_use');
           logger.info(`Executing ${toolCalls.length} tool(s)`);
 
           const toolResults = await this.executeToolsInParallel(toolCalls, sid);
@@ -99,10 +116,7 @@ export class Agent {
 
         if (response.stop_reason === 'max_tokens') {
           logger.warn('Response truncated due to max tokens limit');
-          const textContent = response.content
-            .filter((c: any) => c.type === 'text')
-            .map((c: any) => c.text)
-            .join('\n');
+          const textContent = this.extractTextContent(response.content);
 
           if (textContent) {
             const assistantMsg: Message = {
@@ -116,10 +130,7 @@ export class Agent {
 
         // If we reach here with an unexpected stop reason
         logger.warn('Unexpected stop reason', { stopReason: response.stop_reason });
-        const fallbackText = response.content
-          .filter((c: any) => c.type === 'text')
-          .map((c: any) => c.text)
-          .join('\n') || 'No response generated.';
+        const fallbackText = this.extractTextContent(response.content) || 'No response generated.';
 
         const assistantMsg: Message = {
           role: 'assistant',
@@ -135,12 +146,17 @@ export class Agent {
           sessionId: sid,
         });
 
-        // If it's an API error, provide more specific information
-        if (error.status) {
-          throw new Error(`API Error (${error.status}): ${error.message}`);
+        // If it's already a custom error, rethrow it
+        if (error instanceof APIError || error instanceof ToolExecutionError || error instanceof SessionError) {
+          throw error;
         }
 
-        throw new Error(`Agent error: ${error.message}`);
+        // If it's an API error, wrap it
+        if (error.status) {
+          throw new APIError(`API Error (${error.status}): ${error.message}`, error.status, error);
+        }
+
+        throw new SessionError(`Agent error: ${error.message}`, sid);
       }
     }
 
@@ -148,19 +164,29 @@ export class Agent {
     return 'Maximum iterations reached. The task may be too complex. Please try breaking it into smaller steps.';
   }
 
+  /**
+   * Extract text content from response content blocks
+   */
+  private extractTextContent(content: ContentBlock[]): string {
+    return content
+      .filter((c: ContentBlock) => c.type === 'text')
+      .map((c: ContentBlock) => c.text || '')
+      .join('\n');
+  }
+
   private async executeToolsInParallel(
-    toolCalls: any[],
+    toolCalls: ContentBlock[],
     sessionId: string
   ): Promise<ToolResult[]> {
     const results = await Promise.allSettled(
       toolCalls.map(async (content) => {
-        const tool = getToolByName(content.name);
+        const tool = getToolByName(content.name || '');
         if (!tool) {
           logger.error(`Tool not found: ${content.name}`);
-          return {
-            toolCallId: content.id,
-            content: JSON.stringify({ error: `Tool ${content.name} not found` }),
-          };
+          throw new ToolExecutionError(
+            `Tool ${content.name} not found`,
+            content.name || 'unknown'
+          );
         }
 
         try {
@@ -174,20 +200,21 @@ export class Agent {
           await this.sessionStore.addMessage(sessionId, {
             role: 'tool',
             content: result,
-            toolCallId: content.id,
+            toolCallId: content.id || '',
             toolName: content.name,
           });
 
           return {
-            toolCallId: content.id,
+            toolCallId: content.id || '',
             content: result,
           };
         } catch (error: any) {
           logger.error(`Tool execution failed: ${content.name}`, { error: error.message });
-          return {
-            toolCallId: content.id,
-            content: JSON.stringify({ error: error.message }),
-          };
+          throw new ToolExecutionError(
+            error.message,
+            content.name || 'unknown',
+            content.input
+          );
         }
       })
     );
@@ -199,19 +226,20 @@ export class Agent {
       } else {
         logger.error(`Tool promise rejected`, { error: result.reason });
         return {
-          toolCallId: toolCalls[index].id,
+          toolCallId: toolCalls[index].id || '',
           content: JSON.stringify({ error: 'Tool execution failed' }),
         };
       }
     });
   }
 
-  private async makeApiCallWithRetry(params: any): Promise<any> {
+  private async makeApiCallWithRetry(params: Anthropic.MessageCreateParams): Promise<APIResponse> {
     let lastError: Error | null = null;
 
     for (let attempt = 1; attempt <= this.retryAttempts; attempt++) {
       try {
-        return await this.client.messages.create(params);
+        const response = await this.client.messages.create(params);
+        return response as APIResponse;
       } catch (error: any) {
         lastError = error;
         logger.warn(`API call failed (attempt ${attempt}/${this.retryAttempts})`, {
@@ -221,7 +249,7 @@ export class Agent {
 
         // Don't retry on client errors (4xx), only on server errors (5xx) and network issues
         if (error.status && error.status >= 400 && error.status < 500) {
-          throw error;
+          throw new APIError(error.message, error.status, error);
         }
 
         if (attempt < this.retryAttempts) {
@@ -232,7 +260,11 @@ export class Agent {
       }
     }
 
-    throw lastError || new Error('API call failed after retries');
+    throw new APIError(
+      lastError?.message || 'API call failed after retries',
+      undefined,
+      lastError
+    );
   }
 
   private getDefaultSystemPrompt(): string {
