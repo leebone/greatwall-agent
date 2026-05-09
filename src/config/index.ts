@@ -24,7 +24,9 @@ export function loadConfig(): Config {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     openaiApiKey: process.env.OPENAI_API_KEY,
     defaultModel: process.env.DEFAULT_MODEL,
-    temperature: process.env.DEFAULT_TEMPERATURE ? parseFloat(process.env.DEFAULT_TEMPERATURE) : undefined,
+    temperature: process.env.DEFAULT_TEMPERATURE
+      ? parseFloat(process.env.DEFAULT_TEMPERATURE)
+      : undefined,
     maxTokens: process.env.MAX_TOKENS ? parseInt(process.env.MAX_TOKENS) : undefined,
     maxIterations: process.env.MAX_ITERATIONS ? parseInt(process.env.MAX_ITERATIONS) : undefined,
     agentName: process.env.AGENT_NAME,

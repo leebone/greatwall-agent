@@ -3,7 +3,10 @@
  */
 
 export class AgentError extends Error {
-  constructor(message: string, public code?: string) {
+  constructor(
+    message: string,
+    public code?: string
+  ) {
     super(message);
     this.name = 'AgentError';
     Error.captureStackTrace(this, this.constructor);
@@ -40,14 +43,20 @@ export class APIError extends AgentError {
 }
 
 export class SessionError extends AgentError {
-  constructor(message: string, public sessionId?: string) {
+  constructor(
+    message: string,
+    public sessionId?: string
+  ) {
     super(message, 'SESSION_ERROR');
     this.name = 'SessionError';
   }
 }
 
 export class ValidationError extends AgentError {
-  constructor(message: string, public field?: string) {
+  constructor(
+    message: string,
+    public field?: string
+  ) {
     super(message, 'VALIDATION_ERROR');
     this.name = 'ValidationError';
   }

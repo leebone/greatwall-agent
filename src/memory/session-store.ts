@@ -38,7 +38,7 @@ export class SessionStore {
         logging: false,
         ttl: false,
         expiredInterval: 2 * 60 * 1000,
-        forgiveParseErrors: false
+        forgiveParseErrors: false,
       });
       this.initialized = true;
       logger.debug('Session storage initialized');
@@ -123,7 +123,7 @@ export class SessionStore {
     const sessions: Session[] = [];
 
     for (const key of sessionKeys) {
-      const session = await storage.getItem(key) as Session;
+      const session = (await storage.getItem(key)) as Session;
       if (session) {
         // Don't include full message history in list view
         sessions.push({
@@ -134,8 +134,8 @@ export class SessionStore {
     }
 
     // Sort by update time, most recent first
-    const sorted = sessions.sort((a, b) =>
-      new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    const sorted = sessions.sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
     );
 
     return limit ? sorted.slice(0, limit) : sorted;
@@ -167,7 +167,7 @@ export class SessionStore {
     const sessions: Session[] = [];
 
     for (const key of sessionKeys) {
-      const session = await storage.getItem(key) as Session;
+      const session = (await storage.getItem(key)) as Session;
       if (session) {
         const hasMatch = session.messages.some(m =>
           m.content.toLowerCase().includes(query.toLowerCase())
@@ -195,7 +195,7 @@ export class SessionStore {
     const memories: Memory[] = [];
 
     for (const key of memoryKeys) {
-      const memory = await storage.getItem(key) as Memory;
+      const memory = (await storage.getItem(key)) as Memory;
       if (memory) {
         const matchesQuery = memory.content.toLowerCase().includes(query.toLowerCase());
         const matchesType = !type || memory.type === type;
@@ -222,7 +222,7 @@ export class SessionStore {
 
     let totalMessages = 0;
     for (const key of sessionKeys) {
-      const session = await storage.getItem(key) as Session;
+      const session = (await storage.getItem(key)) as Session;
       if (session) {
         totalMessages += session.messages.length;
       }

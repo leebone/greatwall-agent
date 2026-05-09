@@ -80,7 +80,7 @@ export const listDirectoryTool: Tool = {
     try {
       const entries = await readdir(args.path);
       const details = await Promise.all(
-        entries.map(async (entry) => {
+        entries.map(async entry => {
           const fullPath = `${args.path}/${entry}`;
           const stats = await stat(fullPath);
           return {

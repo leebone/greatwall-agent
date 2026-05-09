@@ -52,9 +52,10 @@ export const fetchUrlTool: Tool = {
         success: true,
         status: response.status,
         contentType: response.headers['content-type'],
-        content: typeof response.data === 'string'
-          ? response.data.slice(0, 5000) // Limit content size
-          : JSON.stringify(response.data).slice(0, 5000),
+        content:
+          typeof response.data === 'string'
+            ? response.data.slice(0, 5000) // Limit content size
+            : JSON.stringify(response.data).slice(0, 5000),
       });
     } catch (error: any) {
       return JSON.stringify({

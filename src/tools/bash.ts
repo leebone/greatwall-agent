@@ -6,7 +6,8 @@ const execAsync = promisify(exec);
 
 export const bashTool: Tool = {
   name: 'bash',
-  description: 'Execute bash commands. Use this to run shell commands, navigate the filesystem, install packages, etc.',
+  description:
+    'Execute bash commands. Use this to run shell commands, navigate the filesystem, install packages, etc.',
   parameters: {
     type: 'object',
     properties: {

@@ -168,7 +168,11 @@ export class Agent {
         });
 
         // If it's already a custom error, rethrow it
-        if (error instanceof APIError || error instanceof ToolExecutionError || error instanceof SessionError) {
+        if (
+          error instanceof APIError ||
+          error instanceof ToolExecutionError ||
+          error instanceof SessionError
+        ) {
           throw error;
         }
 
@@ -200,14 +204,11 @@ export class Agent {
     sessionId: string
   ): Promise<ToolResult[]> {
     const results = await Promise.allSettled(
-      toolCalls.map(async (content) => {
+      toolCalls.map(async content => {
         const tool = getToolByName(content.name || '');
         if (!tool) {
           logger.error(`Tool not found: ${content.name}`);
-          throw new ToolExecutionError(
-            `Tool ${content.name} not found`,
-            content.name || 'unknown'
-          );
+          throw new ToolExecutionError(`Tool ${content.name} not found`, content.name || 'unknown');
         }
 
         try {
@@ -231,11 +232,7 @@ export class Agent {
           };
         } catch (error: any) {
           logger.error(`Tool execution failed: ${content.name}`, { error: error.message });
-          throw new ToolExecutionError(
-            error.message,
-            content.name || 'unknown',
-            content.input
-          );
+          throw new ToolExecutionError(error.message, content.name || 'unknown', content.input);
         }
       })
     );
@@ -281,11 +278,7 @@ export class Agent {
       }
     }
 
-    throw new APIError(
-      lastError?.message || 'API call failed after retries',
-      undefined,
-      lastError
-    );
+    throw new APIError(lastError?.message || 'API call failed after retries', undefined, lastError);
   }
 
   private getDefaultSystemPrompt(): string {
