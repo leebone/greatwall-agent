@@ -19,6 +19,10 @@ interface APIResponse {
   [key: string]: any;
 }
 
+/**
+ * Agent class that orchestrates conversations with Claude AI
+ * Handles message management, tool execution, and session persistence
+ */
 export class Agent {
   private client: Anthropic;
   private config: AgentConfig;
@@ -26,6 +30,12 @@ export class Agent {
   private retryAttempts: number = 3;
   private retryDelay: number = 1000;
 
+  /**
+   * Creates a new Agent instance
+   * @param apiKey - Anthropic API key
+   * @param config - Agent configuration including model, temperature, etc.
+   * @param sessionStore - Session storage instance for persisting conversations
+   */
   constructor(apiKey: string, config: AgentConfig, sessionStore: SessionStore) {
     this.client = new Anthropic({ apiKey });
     this.config = config;
@@ -33,6 +43,17 @@ export class Agent {
     logger.debug('Agent initialized', { model: config.model, maxIterations: config.maxIterations });
   }
 
+  /**
+   * Processes a user message and returns the agent's response
+   * Handles multi-turn conversations with tool execution
+   * @param userMessage - The message from the user
+   * @param sessionId - Optional session ID to continue an existing conversation
+   * @returns The agent's text response
+   * @throws {ValidationError} If the user message is empty
+   * @throws {APIError} If the API call fails
+   * @throws {SessionError} If there's an error with session management
+   * @throws {ToolExecutionError} If a tool fails to execute
+   */
   async chat(userMessage: string, sessionId?: string): Promise<string> {
     // Validate input
     if (!userMessage || !userMessage.trim()) {

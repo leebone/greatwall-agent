@@ -3,10 +3,18 @@ import { mkdirSync, existsSync } from 'fs';
 import type { Session, Message, Memory } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
+/**
+ * SessionStore manages persistent storage of chat sessions and memories
+ * Uses node-persist for file-based storage
+ */
 export class SessionStore {
   private initialized: boolean = false;
   private dbPath: string;
 
+  /**
+   * Creates a new SessionStore instance
+   * @param dbPath - Directory path for storing session data
+   */
   constructor(dbPath: string) {
     this.dbPath = dbPath;
     // Ensure directory exists
@@ -33,6 +41,12 @@ export class SessionStore {
     }
   }
 
+  /**
+   * Creates a new session
+   * @param id - Unique session identifier
+   * @param metadata - Optional metadata to attach to the session
+   * @returns The newly created session
+   */
   async createSession(id: string, metadata?: Record<string, any>): Promise<Session> {
     await this.ensureInitialized();
     const now = new Date();
@@ -49,12 +63,23 @@ export class SessionStore {
     return session;
   }
 
+  /**
+   * Retrieves a session by ID
+   * @param id - Session identifier
+   * @returns The session if found, null otherwise
+   */
   async getSession(id: string): Promise<Session | null> {
     await this.ensureInitialized();
     const session = await storage.getItem(`session:${id}`);
     return session || null;
   }
 
+  /**
+   * Adds a message to an existing session
+   * @param sessionId - Session identifier
+   * @param message - Message to add to the session
+   * @throws {Error} If the session is not found
+   */
   async addMessage(sessionId: string, message: Message): Promise<void> {
     await this.ensureInitialized();
     const session = await this.getSession(sessionId);
@@ -67,6 +92,11 @@ export class SessionStore {
     await storage.setItem(`session:${sessionId}`, session);
   }
 
+  /**
+   * Lists all sessions, sorted by most recent first
+   * @param limit - Maximum number of sessions to return (optional)
+   * @returns Array of sessions with preview of first message
+   */
   async listSessions(limit?: number): Promise<Session[]> {
     await this.ensureInitialized();
     const keys = await storage.keys();
@@ -104,6 +134,12 @@ export class SessionStore {
     return true;
   }
 
+  /**
+   * Searches sessions for a specific query string
+   * @param query - Search query to match against message content
+   * @param limit - Maximum number of results to return (default: 10)
+   * @returns Array of matching sessions
+   */
   async searchSessions(query: string, limit: number = 10): Promise<Session[]> {
     await this.ensureInitialized();
     const keys = await storage.keys();
