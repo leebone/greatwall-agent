@@ -1,6 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { Config } from '../config/index.js';
-import type { Message, ToolCall, ToolResult, AgentConfig } from '../types/index.js';
+import type { Message, ToolResult, AgentConfig } from '../types/index.js';
 import { formatToolsForAnthropic, getToolByName } from '../tools/index.js';
 import { SessionStore } from '../memory/session-store.js';
 import { logger } from '../utils/logger.js';

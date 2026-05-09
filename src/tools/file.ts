@@ -1,5 +1,4 @@
 import { readFile, writeFile, readdir, stat } from 'fs/promises';
-import { existsSync } from 'fs';
 import type { Tool } from '../types/index.js';
 
 export const readFileTool: Tool = {

@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import dotenv from 'dotenv';
-import { existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
