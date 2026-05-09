@@ -2,21 +2,25 @@ import storage from 'node-persist';
 import { mkdirSync, existsSync } from 'fs';
 import type { Session, Message, Memory } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import { LRUCache } from '../utils/cache.js';
 
 /**
  * SessionStore manages persistent storage of chat sessions and memories
- * Uses node-persist for file-based storage
+ * Uses node-persist for file-based storage with LRU caching for performance
  */
 export class SessionStore {
   private initialized: boolean = false;
   private dbPath: string;
+  private sessionCache: LRUCache<string, Session>;
 
   /**
    * Creates a new SessionStore instance
    * @param dbPath - Directory path for storing session data
+   * @param cacheSize - Maximum number of sessions to keep in memory cache (default: 50)
    */
-  constructor(dbPath: string) {
+  constructor(dbPath: string, cacheSize: number = 50) {
     this.dbPath = dbPath;
+    this.sessionCache = new LRUCache<string, Session>(cacheSize);
     // Ensure directory exists
     if (!existsSync(dbPath)) {
       mkdirSync(dbPath, { recursive: true });
@@ -59,6 +63,7 @@ export class SessionStore {
     };
 
     await storage.setItem(`session:${id}`, session);
+    this.sessionCache.set(id, session); // Cache the new session
     logger.info('Session created', { sessionId: id });
     return session;
   }
@@ -70,7 +75,20 @@ export class SessionStore {
    */
   async getSession(id: string): Promise<Session | null> {
     await this.ensureInitialized();
+
+    // Check cache first
+    const cached = this.sessionCache.get(id);
+    if (cached) {
+      logger.debug('Session retrieved from cache', { sessionId: id });
+      return cached;
+    }
+
+    // If not in cache, load from storage
     const session = await storage.getItem(`session:${id}`);
+    if (session) {
+      this.sessionCache.set(id, session); // Cache the loaded session
+      logger.debug('Session loaded from storage', { sessionId: id });
+    }
     return session || null;
   }
 
@@ -90,6 +108,7 @@ export class SessionStore {
     session.messages.push(message);
     session.updatedAt = new Date();
     await storage.setItem(`session:${sessionId}`, session);
+    this.sessionCache.set(sessionId, session); // Update cache
   }
 
   /**
@@ -130,6 +149,7 @@ export class SessionStore {
     }
 
     await storage.removeItem(`session:${id}`);
+    this.sessionCache.delete(id); // Remove from cache
     logger.info('Session deleted', { sessionId: id });
     return true;
   }
