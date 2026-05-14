@@ -1,0 +1,243 @@
+import storage from 'node-persist';
+import { mkdirSync, existsSync } from 'fs';
+import type { Session, Message, Memory } from '../types/index.js';
+import { logger } from '../utils/logger.js';
+import { LRUCache } from '../utils/cache.js';
+
+/**
+ * SessionStore manages persistent storage of chat sessions and memories
+ * Uses node-persist for file-based storage with LRU caching for performance
+ */
+export class SessionStore {
+  private initialized: boolean = false;
+  private dbPath: string;
+  private sessionCache: LRUCache<string, Session>;
+
+  /**
+   * Creates a new SessionStore instance
+   * @param dbPath - Directory path for storing session data
+   * @param cacheSize - Maximum number of sessions to keep in memory cache (default: 50)
+   */
+  constructor(dbPath: string, cacheSize: number = 50) {
+    this.dbPath = dbPath;
+    this.sessionCache = new LRUCache<string, Session>(cacheSize);
+    // Ensure directory exists
+    if (!existsSync(dbPath)) {
+      mkdirSync(dbPath, { recursive: true });
+      logger.debug('Created session storage directory', { path: dbPath });
+    }
+  }
+
+  private async ensureInitialized(): Promise<void> {
+    if (!this.initialized) {
+      await storage.init({
+        dir: this.dbPath,
+        stringify: JSON.stringify,
+        parse: JSON.parse,
+        encoding: 'utf8',
+        logging: false,
+        ttl: false,
+        expiredInterval: 2 * 60 * 1000,
+        forgiveParseErrors: false,
+      });
+      this.initialized = true;
+      logger.debug('Session storage initialized');
+    }
+  }
+
+  /**
+   * Creates a new session
+   * @param id - Unique session identifier
+   * @param metadata - Optional metadata to attach to the session
+   * @returns The newly created session
+   */
+  async createSession(id: string, metadata?: Record<string, any>): Promise<Session> {
+    await this.ensureInitialized();
+    const now = new Date();
+    const session: Session = {
+      id,
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+      metadata,
+    };
+
+    await storage.setItem(`session:${id}`, session);
+    this.sessionCache.set(id, session); // Cache the new session
+    logger.info('Session created', { sessionId: id });
+    return session;
+  }
+
+  /**
+   * Retrieves a session by ID
+   * @param id - Session identifier
+   * @returns The session if found, null otherwise
+   */
+  async getSession(id: string): Promise<Session | null> {
+    await this.ensureInitialized();
+
+    // Check cache first
+    const cached = this.sessionCache.get(id);
+    if (cached) {
+      logger.debug('Session retrieved from cache', { sessionId: id });
+      return cached;
+    }
+
+    // If not in cache, load from storage
+    const session = await storage.getItem(`session:${id}`);
+    if (session) {
+      this.sessionCache.set(id, session); // Cache the loaded session
+      logger.debug('Session loaded from storage', { sessionId: id });
+    }
+    return session || null;
+  }
+
+  /**
+   * Adds a message to an existing session
+   * @param sessionId - Session identifier
+   * @param message - Message to add to the session
+   * @throws {Error} If the session is not found
+   */
+  async addMessage(sessionId: string, message: Message): Promise<void> {
+    await this.ensureInitialized();
+    const session = await this.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    session.messages.push(message);
+    session.updatedAt = new Date();
+    await storage.setItem(`session:${sessionId}`, session);
+    this.sessionCache.set(sessionId, session); // Update cache
+  }
+
+  /**
+   * Lists all sessions, sorted by most recent first
+   * @param limit - Maximum number of sessions to return (optional)
+   * @returns Array of sessions with preview of first message
+   */
+  async listSessions(limit?: number): Promise<Session[]> {
+    await this.ensureInitialized();
+    const keys = await storage.keys();
+    const sessionKeys = keys.filter((k: string) => k.startsWith('session:'));
+    const sessions: Session[] = [];
+
+    for (const key of sessionKeys) {
+      const session = (await storage.getItem(key)) as Session;
+      if (session) {
+        // Don't include full message history in list view
+        sessions.push({
+          ...session,
+          messages: session.messages.slice(0, 1), // Only keep first message for preview
+        });
+      }
+    }
+
+    // Sort by update time, most recent first
+    const sorted = sessions.sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    );
+
+    return limit ? sorted.slice(0, limit) : sorted;
+  }
+
+  async deleteSession(id: string): Promise<boolean> {
+    await this.ensureInitialized();
+    const session = await this.getSession(id);
+    if (!session) {
+      return false;
+    }
+
+    await storage.removeItem(`session:${id}`);
+    this.sessionCache.delete(id); // Remove from cache
+    logger.info('Session deleted', { sessionId: id });
+    return true;
+  }
+
+  /**
+   * Searches sessions for a specific query string
+   * @param query - Search query to match against message content
+   * @param limit - Maximum number of results to return (default: 10)
+   * @returns Array of matching sessions
+   */
+  async searchSessions(query: string, limit: number = 10): Promise<Session[]> {
+    await this.ensureInitialized();
+    const keys = await storage.keys();
+    const sessionKeys = keys.filter((k: string) => k.startsWith('session:'));
+    const sessions: Session[] = [];
+
+    for (const key of sessionKeys) {
+      const session = (await storage.getItem(key)) as Session;
+      if (session) {
+        const hasMatch = session.messages.some(m =>
+          m.content.toLowerCase().includes(query.toLowerCase())
+        );
+        if (hasMatch) {
+          sessions.push(session);
+        }
+      }
+      if (sessions.length >= limit) break;
+    }
+
+    return sessions.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  }
+
+  async addMemory(memory: Memory): Promise<void> {
+    await this.ensureInitialized();
+    await storage.setItem(`memory:${memory.id}`, memory);
+    logger.debug('Memory added', { memoryId: memory.id, type: memory.type });
+  }
+
+  async searchMemories(query: string, type?: string, limit: number = 10): Promise<Memory[]> {
+    await this.ensureInitialized();
+    const keys = await storage.keys();
+    const memoryKeys = keys.filter((k: string) => k.startsWith('memory:'));
+    const memories: Memory[] = [];
+
+    for (const key of memoryKeys) {
+      const memory = (await storage.getItem(key)) as Memory;
+      if (memory) {
+        const matchesQuery = memory.content.toLowerCase().includes(query.toLowerCase());
+        const matchesType = !type || memory.type === type;
+
+        if (matchesQuery && matchesType) {
+          memories.push(memory);
+        }
+      }
+      if (memories.length >= limit) break;
+    }
+
+    return memories.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  async getStats(): Promise<{
+    sessionCount: number;
+    memoryCount: number;
+    totalMessages: number;
+  }> {
+    await this.ensureInitialized();
+    const keys = await storage.keys();
+    const sessionKeys = keys.filter((k: string) => k.startsWith('session:'));
+    const memoryKeys = keys.filter((k: string) => k.startsWith('memory:'));
+
+    let totalMessages = 0;
+    for (const key of sessionKeys) {
+      const session = (await storage.getItem(key)) as Session;
+      if (session) {
+        totalMessages += session.messages.length;
+      }
+    }
+
+    return {
+      sessionCount: sessionKeys.length,
+      memoryCount: memoryKeys.length,
+      totalMessages,
+    };
+  }
+
+  async close(): Promise<void> {
+    // node-persist doesn't need explicit closing
+    this.initialized = false;
+    logger.debug('Session storage closed');
+  }
+}
